@@ -1,0 +1,247 @@
+#!/usr/bin/env ruby
+
+require 'trollop'
+require 'zookeeper'
+require 'yajl/json_gem'
+require 'faraday_middleware'
+require 'kafka'
+
+require 'librato/metrics'
+
+$:.unshift File.join(File.dirname(__FILE__), '../lib')
+
+require 'librato-storm-kafka'
+
+parser = Trollop::Parser.new do
+  version "librato-storm-kafka version %s" %
+    [Librato::Storm::Kafka::VERSION]
+
+  opt :api, "Change the API endpoint", {
+    :type => :string, :default => "metrics-api.librato.com"
+  }
+
+  opt :email, "Librato Metrics Email", {
+    :type => :string, :default => ENV['LIBRATO_METRICS_EMAIL']
+  }
+
+  opt :token, "Librato Metrics API Token", {
+    :type => :string, :default => ENV['LIBRATO_METRICS_TOKEN']
+  }
+
+  opt :prefix, "Metric name prefix", {
+    :type => :string, :default => "kafkastorm."
+  }
+
+  opt :floor_in_secs, "floor() measure times to this interval", {
+    :type => :int
+  }
+
+  opt :mx4j_port, "Port to connect to MX4J on", {
+    :default => 8082
+  }
+
+  opt :zk_servers, "ZooKeeper servers (comma separated)", {
+    :type => :string
+  }
+
+  opt :zk_port, "Port to connect to ZK on", {
+    :default => 2181
+  }
+
+  opt :zk_prefix, "Prefix path in ZK to find consumers", {
+    :default => "/kafkastorm"
+  }
+end
+
+opts = Trollop::with_standard_exception_handling(parser) do
+  if ARGV.length == 0
+    raise Trollop::HelpNeeded
+  end
+
+  opts = parser.parse ARGV
+  %w{ email token zk_servers }.each do |f|
+    unless opts[f.to_sym]
+      $stderr.puts "Error: Must specify option --%s." % [f]
+      puts
+      raise Trollop::HelpNeeded
+    end
+  end
+  opts
+end
+
+$mt = Time.now.tv_sec
+if opts[:floor_in_secs]
+  $mt = ($mt / opts[:floor_in_secs]) * opts[:floor_in_secs]
+end
+
+endpoint = "https://#{opts[:api]}"
+$client = Librato::Metrics::Client.new
+$client.api_endpoint = endpoint
+$client.authenticate opts[:email], opts[:token]
+
+zk_connect_str = opts[:zk_servers].split(",").
+  map {|s| "#{s}:#{opts[:zk_port]}"}.join(",")
+
+$z = Zookeeper.new(zk_connect_str)
+
+def submit(q)
+  begin
+    q.submit
+  rescue => err
+    $stderr.puts "Failed to submit stats to Librato Metrics: %s" %
+      [err.message]
+    exit 1
+  end
+end
+
+def with_children(path, &blk)
+  kids = $z.get_children(:path => path)
+  if kids[:rc] != 0
+    $stderr.puts "Unable to list children at path: #{path}"
+    exit 1
+  end
+  kids[:children].each {|k| yield(k, "#{path}/#{k}") }
+end
+
+def http(host)
+  Faraday.new("http://#{host}:8082") do |conn|
+    conn.response :xml
+
+    conn.adapter Faraday.default_adapter
+  end
+end
+
+def bean_lookup(host, beanname)
+  begin
+    http(host).get("/mbean") do |req|
+      req.params = { :objectname => beanname, :template  => 'identity' }
+      req.options[:timeout] = 5
+      req.options[:open_timeout] = 3
+    end
+  rescue Faraday::Error::TimeoutError
+    raise Errno::ETIMEDOUT
+  rescue Faraday::Error::ConnectionFailed
+    raise Errno::EHOSTUNREACH
+  end
+end
+
+def partition_bean_lookup(host, partname, partidx)
+  bean_lookup(host, "kafka:type=kafka.logs.#{partname}-#{partidx}") 
+end
+
+def jmxinfo_to_attrs(jmxinfo)
+  attrs = {}
+  jmxinfo.body['MBean']['Attribute'].each do |attr|
+    next if attr['isnull'] != 'false'
+    if ['long', 'int'].include?(attr['type'])
+      attrs[attr['name']] = Integer(attr['value'])
+    elsif attr['type'] =~ /CompositeData/
+      # XXX: Hack out the contents of the composite type. This should
+      # really be expanded in the XML
+      fields = attr['value'].gsub(/^.*,contents={/, '').gsub(/}\)$/, '')
+        .gsub(/[=,]/, '@').split("@")
+      attrs[attr['name']] = Hash[*fields.map {|u| u.strip}]
+    else
+      attrs[attr['name']] = attr['value']
+    end
+  end
+  attrs
+end
+
+def monitor_partition(submit_queue, hosts, opts, part)
+  jmxinfo = partition_bean_lookup(part['broker']['host'],
+                                  part['topic'], part['partition'])
+
+  hosts[part['broker']['host']] = 1
+
+  attrs = jmxinfo_to_attrs(jmxinfo)
+
+  #puts "part: #{part.inspect}"
+  #puts "attrs: #{attrs.inspect}"
+
+  consumer = Kafka::Consumer.new({ :host => part['broker']['host'],
+                                   :topic => part['topic'],
+                                   :partition => part['partition']})
+  endoffset = consumer.fetch_latest_offset
+  #puts "%s:%s:%d: latest offset: %d" % [part['broker']['host'], part['topic'], part['partition'], endoffset]
+
+  q = $client.new_queue({ :prefix => "#{opts[:prefix]}topics.#{part['topic']}",
+                          :source => "#{part['broker']['host']}_#{part['partition']}"})
+
+  q.add :bytes_vol => {:value => endoffset, :type => :counter}
+  #endsize = [attrs['CurrentOffset'], attrs['Size']].max
+  diff = endoffset > part['offset'] ? endoffset - part['offset'] : 0
+  q.add :pending_bytes => {:value => diff}
+
+
+  if attrs['NumAppendedMessages'] > 0
+    bytes_per_msg = Float(endoffset) / Float(attrs['NumAppendedMessages'])
+    q.add :bytes_per_msg => {:value => bytes_per_msg}
+    q.add :pending_msgs => {:value => Float(diff) / bytes_per_msg} if bytes_per_msg > 0.0
+    q.add :msg_vol => {:value => attrs['NumAppendedMessages'], :type => :counter}
+  end
+   
+  submit_queue.merge!(q)
+end
+
+partitions = 0
+hosts = {}
+submit_queue = $client.new_queue(:measure_time => $mt)
+with_children(opts[:zk_prefix]) do |spout, fullsp|
+  with_children(fullsp) do |part, fullpart|
+    next if part == 'user'
+
+    partinfo = $z.get(:path => fullpart)
+    if partinfo[:rc] != 0
+      $stderr.puts "Failed to lookup partition: #{fullpart}"
+      exit 1
+    end
+
+    body = JSON.parse(partinfo[:data])
+    begin
+      monitor_partition(submit_queue, hosts, opts, body)
+      partitions += 1
+    rescue Errno::ETIMEDOUT, Errno::EHOSTUNREACH
+    end
+  end
+end
+
+submit_queue.add "#{opts[:prefix]}active_partitions" => {:value => partitions}
+
+# Now check host-level options
+active_hosts = 0
+hosts.each_pair do |host, v|
+  q = $client.new_queue({ :prefix => "#{opts[:prefix]}hosts",
+                          :source => "#{host}"})
+  begin
+    jmxinfo = bean_lookup(host, "kafka:type=kafka.BrokerAllTopicStat")
+    attrs = jmxinfo_to_attrs(jmxinfo)
+    q.add :bytes_in => {:value => attrs['BytesIn'], :type => :counter}
+    q.add :bytes_out => {:value => attrs['BytesOut'], :type => :counter}
+    q.add :failed_fetch_request => {:value => attrs['FailedFetchRequest'], :type => :counter}
+    q.add :failed_produce_request => {:value => attrs['FailedProduceRequest'], :type => :counter}
+    q.add :messages_in => {:value => attrs['MessagesIn'], :type => :counter}
+
+    jmxinfo = bean_lookup(host, "java.lang:type=Memory")
+    attrs = jmxinfo_to_attrs(jmxinfo)
+    attrs.each_pair do |name, values|
+      next unless name =~ /HeapMemory/
+      values.each_pair do |attrn, attrv|
+        q.add "memory.#{name.downcase}.#{attrn.downcase}" => {:value => Integer(attrv)}
+      end
+    end
+
+    active_hosts += 1
+  rescue Errno::ETIMEDOUT, Errno::EHOSTUNREACH
+    next
+  end
+  submit_queue.merge!(q)
+end
+
+submit_queue.add "#{opts[:prefix]}active_hosts" => {:value => active_hosts}
+
+submit_queue.submit
+
+# Local Variables:
+# mode: ruby
+# End:
