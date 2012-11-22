@@ -7,7 +7,7 @@ Gem::Specification.new do |s|
   s.version     = Librato::Storm::Kafka::VERSION
   s.authors     = ["Mike Heffner"]
   s.email       = ["mike@librato.com"]
-  s.homepage    = ""
+  s.homepage    = "https://github.com/librato/librato-storm-kafka"
   s.summary     = %q{Monitor storm-kafka topics}
   s.description = %q{Collects metrics from a storm-kafka setup and publishes them to Librato}
 
