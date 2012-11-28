@@ -54,6 +54,11 @@ $ librato-storm-kafka  --email <librato email>
                    time by this value. For example, 300 would floor
                    all measure times to the 5 minute mark.
 
+## Screenshots
+
+The following is an example dashboard showing the metrics collected from three Storm topologies using a single Kafka broker.
+
+![Storm Kafka Dashboard](https://s3.amazonaws.com/librato_images/storm-kafka/dashboard1.png)
 
 ## Contributing to librato-storm-kafka
 
