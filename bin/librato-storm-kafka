@@ -148,7 +148,7 @@ def jmxinfo_to_attrs(jmxinfo)
   attrs
 end
 
-def monitor_partition(submit_queue, hosts, opts, part)
+def monitor_partition(submit_queue, hosts, opts, part, pfx = "")
   jmxinfo = partition_bean_lookup(part['broker']['host'],
                                   part['topic'], part['partition'])
 
@@ -165,8 +165,8 @@ def monitor_partition(submit_queue, hosts, opts, part)
   endoffset = consumer.fetch_latest_offset
   #puts "%s:%s:%d: latest offset: %d" % [part['broker']['host'], part['topic'], part['partition'], endoffset]
 
-  q = $client.new_queue({ :prefix => "#{opts[:prefix]}topics.#{part['topic']}",
-                          :source => "#{part['broker']['host']}_#{part['partition']}"})
+  q = $client.new_queue({ :prefix => "#{pfx}#{opts[:prefix]}topics.#{part['topic']}",
+                          :source => "#{part['broker']['host']}_#{part['partition']}", :skip_measurement_times => true})
 
   q.add :bytes_vol => {:value => endoffset, :type => :counter}
   #endsize = [attrs['CurrentOffset'], attrs['Size']].max
@@ -186,7 +186,7 @@ end
 
 partitions = 0
 hosts = {}
-submit_queue = $client.new_queue(:measure_time => $mt)
+submit_queue = $client.new_queue(:measure_time => $mt, :autosubmit_count => 300, :skip_measurement_times => true)
 with_children(opts[:zk_prefix]) do |spout, fullsp|
   with_children(fullsp) do |part, fullpart|
     next if part == 'user'
@@ -198,11 +198,18 @@ with_children(opts[:zk_prefix]) do |spout, fullsp|
     end
 
     body = JSON.parse(partinfo[:data])
+    tmppfx = ""
     begin
-      monitor_partition(submit_queue, hosts, opts, body)
+      monitor_partition(submit_queue, hosts, opts, body, tmppfx)
       partitions += 1
     rescue Errno::ETIMEDOUT, Errno::EHOSTUNREACH
     end
+
+    if submit_queue.size >= 300
+          submit_queue.submit
+          submit_queue.clear
+    end
+
   end
 end
 
@@ -212,7 +219,7 @@ submit_queue.add "#{opts[:prefix]}active_partitions" => {:value => partitions}
 active_hosts = 0
 hosts.each_pair do |host, v|
   q = $client.new_queue({ :prefix => "#{opts[:prefix]}hosts",
-                          :source => "#{host}"})
+                          :source => "#{host}", :skip_measurement_times => true})
   begin
     jmxinfo = bean_lookup(host, "kafka:type=kafka.BrokerAllTopicStat")
     attrs = jmxinfo_to_attrs(jmxinfo)
