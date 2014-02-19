@@ -163,24 +163,18 @@ def monitor_partition(submit_queue, hosts, opts, part, pfx = "")
                                    :topic => part['topic'],
                                    :partition => part['partition']})
   endoffset = consumer.fetch_latest_offset
-  #puts "%s:%s:%d: latest offset: %d" % [part['broker']['host'], part['topic'], part['partition'], endoffset]
 
   q = $client.new_queue({ :prefix => "#{pfx}#{opts[:prefix]}topics.#{part['topic']}",
                           :source => "#{part['broker']['host']}_#{part['partition']}", :skip_measurement_times => true})
 
   q.add :bytes_vol => {:value => endoffset, :type => :counter}
-  #endsize = [attrs['CurrentOffset'], attrs['Size']].max
   diff = endoffset > part['offset'] ? endoffset - part['offset'] : 0
   q.add :pending_bytes => {:value => diff}
 
-
   if attrs['NumAppendedMessages'] > 0
-    bytes_per_msg = Float(endoffset) / Float(attrs['NumAppendedMessages'])
-    q.add :bytes_per_msg => {:value => bytes_per_msg}
-    q.add :pending_msgs => {:value => Float(diff) / bytes_per_msg} if bytes_per_msg > 0.0
     q.add :msg_vol => {:value => attrs['NumAppendedMessages'], :type => :counter}
   end
-   
+
   submit_queue.merge!(q)
 end
 
