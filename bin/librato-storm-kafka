@@ -69,10 +69,13 @@ opts = Trollop::with_standard_exception_handling(parser) do
   opts
 end
 
+$start_time = Time.now
+
 $mt = Time.now.tv_sec
 if opts[:floor_in_secs]
   $mt = ($mt / opts[:floor_in_secs]) * opts[:floor_in_secs]
 end
+
 
 endpoint = "https://#{opts[:api]}"
 $client = Librato::Metrics::Client.new
@@ -126,7 +129,7 @@ def bean_lookup(host, beanname)
 end
 
 def partition_bean_lookup(host, partname, partidx)
-  bean_lookup(host, "kafka:type=kafka.logs.#{partname}-#{partidx}") 
+  bean_lookup(host, "kafka:type=kafka.logs.#{partname}-#{partidx}")
 end
 
 def jmxinfo_to_attrs(jmxinfo)
@@ -164,7 +167,7 @@ def monitor_partition(submit_queue, hosts, opts, part, pfx = "")
                                    :partition => part['partition']})
   endoffset = consumer.fetch_latest_offset
 
-  q = $client.new_queue({ :prefix => "#{pfx}#{opts[:prefix]}topics.#{part['topic']}",
+  q = $client.new_queue({ :prefix => "#{pfx}#{opts[:prefix]}topics.#{part['topology']['name']}.#{part['topic']}",
                           :source => "#{part['broker']['host']}_#{part['partition']}", :skip_measurement_times => true})
 
   q.add :bytes_vol => {:value => endoffset, :type => :counter}
@@ -240,6 +243,10 @@ hosts.each_pair do |host, v|
 end
 
 submit_queue.add "#{opts[:prefix]}active_hosts" => {:value => active_hosts}
+
+$end_time = Time.now
+
+submit_queue.add "#{opts[:prefix]}run_time" => {:value => ($end_time - $start_time)}
 
 submit_queue.submit
 
