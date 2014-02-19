@@ -40,6 +40,10 @@ parser = Trollop::Parser.new do
     :default => 8082
   }
 
+  opt :threads, "How many polling threads to start", {
+    :default => 4
+  }
+
   opt :zk_servers, "ZooKeeper servers (comma separated)", {
     :type => :string
   }
@@ -76,6 +80,10 @@ if opts[:floor_in_secs]
   $mt = ($mt / opts[:floor_in_secs]) * opts[:floor_in_secs]
 end
 
+$parts = []
+$queues = []
+$threads = []
+$mutex = Mutex.new
 
 endpoint = "https://#{opts[:api]}"
 $client = Librato::Metrics::Client.new
@@ -151,7 +159,53 @@ def jmxinfo_to_attrs(jmxinfo)
   attrs
 end
 
-def monitor_partition(submit_queue, hosts, opts, part, pfx = "")
+def do_thr()
+  ret = true
+  while true
+    $mutex.lock
+    work = $parts.pop
+    $mutex.unlock
+    break if work == null
+
+    begin
+      q = monitor_partition(work)
+    rescue Errno::ETIMEDOUT, Errno::EHOSTUNREACH
+    end
+
+    $mutex.lock
+    $queues << q
+    $mutex.unlock
+  end
+  ret
+end
+
+def add_monitor_partition(hosts, opts, part, pfx = "")
+  work = {}
+  q = $client.new_queue({ :prefix => "#{pfx}#{opts[:prefix]}topics.#{part['topology']['name']}.#{part['topic']}",
+                          :source => "#{part['broker']['host']}_#{part['partition']}", :skip_measurement_times => true})
+
+  work = {
+    :queue => q,
+    :hosts => hosts,
+    :opts => opts,
+    :part => part,
+    :pfx => pfx
+  }
+
+  $mutex.lock
+  $parts << work
+  $mutex.unlock
+end
+
+def monitor_partition(work)
+  #def monitor_partition(submit_queue, hosts, opts, part, pfx = "")
+
+  q = work[:queue]
+  hosts = work[:hosts]
+  opts = work[:opts]
+  part = work[:part]
+  pfx = work[:pfx]
+
   jmxinfo = partition_bean_lookup(part['broker']['host'],
                                   part['topic'], part['partition'])
 
@@ -167,8 +221,8 @@ def monitor_partition(submit_queue, hosts, opts, part, pfx = "")
                                    :partition => part['partition']})
   endoffset = consumer.fetch_latest_offset
 
-  q = $client.new_queue({ :prefix => "#{pfx}#{opts[:prefix]}topics.#{part['topology']['name']}.#{part['topic']}",
-                          :source => "#{part['broker']['host']}_#{part['partition']}", :skip_measurement_times => true})
+  #q = $client.new_queue({ :prefix => "#{pfx}#{opts[:prefix]}topics.#{part['topology']['name']}.#{part['topic']}",
+  #                        :source => "#{part['broker']['host']}_#{part['partition']}", :skip_measurement_times => true})
 
   q.add :bytes_vol => {:value => endoffset, :type => :counter}
   diff = endoffset > part['offset'] ? endoffset - part['offset'] : 0
@@ -178,7 +232,7 @@ def monitor_partition(submit_queue, hosts, opts, part, pfx = "")
     q.add :msg_vol => {:value => attrs['NumAppendedMessages'], :type => :counter}
   end
 
-  submit_queue.merge!(q)
+  q
 end
 
 partitions = 0
@@ -196,19 +250,37 @@ with_children(opts[:zk_prefix]) do |spout, fullsp|
 
     body = JSON.parse(partinfo[:data])
     tmppfx = ""
-    begin
-      monitor_partition(submit_queue, hosts, opts, body, tmppfx)
-      partitions += 1
-    rescue Errno::ETIMEDOUT, Errno::EHOSTUNREACH
-    end
 
-    if submit_queue.size >= 300
-          submit_queue.submit
-          submit_queue.clear
-    end
-
+    #monitor_partition(submit_queue, hosts, opts, body, tmppfx)
+    add_monitor_partition(hosts, opts, body, tmppfx)
+    partitions += 1
   end
 end
+
+# Start our threads to poll in parallel
+1.upto(opts[:threads]) do
+  $threads << Thread.new do
+    do_thr
+  end
+end
+
+# Wait for threads to exit
+$threads.each do |thr|
+  if !thr.value
+    $stderr.puts "Thread #{thr.inspect} returned failure!"
+    exit 1
+  end
+end
+
+$queues.each do |q|
+  submit_queue.merge!(q)
+end
+
+if submit_queue.size >= 300
+  submit_queue.submit
+  submit_queue.clear
+end
+
 
 submit_queue.add "#{opts[:prefix]}active_partitions" => {:value => partitions}
 
