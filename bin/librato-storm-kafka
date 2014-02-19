@@ -165,7 +165,7 @@ def do_thr()
     $mutex.lock
     work = $parts.pop
     $mutex.unlock
-    break if work == null
+    break if work.nil?
 
     begin
       q = monitor_partition(work)
