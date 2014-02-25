@@ -119,7 +119,8 @@ def http(host)
   Faraday.new("http://#{host}:8082") do |conn|
     conn.response :xml
 
-    conn.adapter Faraday.default_adapter
+    #conn.adapter Faraday.default_adapter
+    conn.adapter :excon
   end
 end
 
