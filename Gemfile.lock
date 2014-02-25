@@ -2,6 +2,7 @@ PATH
   remote: .
   specs:
     librato-storm-kafka (0.0.2)
+      excon
       faraday_middleware
       kafka-rb
       librato-metrics
@@ -14,26 +15,23 @@ GEM
   remote: http://rubygems.org/
   specs:
     aggregate (0.2.2)
+    excon (0.31.0)
     faraday (0.8.9)
       multipart-post (~> 1.2.0)
     faraday_middleware (0.9.0)
       faraday (>= 0.7.4, < 0.9)
-    kafka-rb (0.0.11)
+    kafka-rb (0.0.15)
     librato-metrics (1.3.0)
       aggregate (~> 0.2.2)
       faraday (~> 0.7)
       multi_json
-    little-plugger (1.1.3)
-    logging (1.7.2)
-      little-plugger (>= 1.1.3)
     multi_json (1.8.4)
-    multi_xml (0.5.1)
+    multi_xml (0.5.5)
     multipart-post (1.2.0)
     rake (10.0.2)
     trollop (2.0)
-    yajl-ruby (1.1.0)
-    zookeeper (1.3.0)
-      logging (~> 1.7.2)
+    yajl-ruby (1.2.0)
+    zookeeper (1.4.8)
 
 PLATFORMS
   ruby
