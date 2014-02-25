@@ -98,6 +98,7 @@ $z = Zookeeper.new(zk_connect_str)
 def submit(q)
   begin
     q.submit
+    q.clear
   rescue => err
     $stderr.puts "Failed to submit stats to Librato Metrics: %s" %
       [err.message]
@@ -274,13 +275,11 @@ end
 
 $queues.each do |q|
   submit_queue.merge!(q)
-end
 
-if submit_queue.size >= 300
-  submit_queue.submit
-  submit_queue.clear
+  if submit_queue.size >= 300
+    submit(submit_queue)
+  end
 end
-
 
 submit_queue.add "#{opts[:prefix]}active_partitions" => {:value => partitions}
 
@@ -320,7 +319,7 @@ $end_time = Time.now
 
 submit_queue.add "#{opts[:prefix]}run_time" => {:value => ($end_time - $start_time)}
 
-submit_queue.submit
+submit(submit_queue)
 
 # Local Variables:
 # mode: ruby
