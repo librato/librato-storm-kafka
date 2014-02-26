@@ -5,6 +5,8 @@ require 'zookeeper'
 require 'yajl/json_gem'
 require 'faraday_middleware'
 require 'kafka'
+require 'excon'
+require 'multi_xml'
 
 require 'librato/metrics'
 
@@ -116,16 +118,18 @@ def with_children(path, &blk)
 end
 
 def http(host, path)
-  Excon.new(URI.parse("#{host}/#{path}").to_s)
+  Excon.new(URI.parse("http://#{host}:8082/#{path}").to_s,
+            :connect_timeout => 3)
 end
 
 def bean_lookup(host, beanname)
   begin
     conn = http(host, "/mbean")
     resp = conn.get(:query => {:objectname => beanname, :template  => 'identity' },
-                    :read_timeout => 5,
-                    :open_timeout => 3)
+                    :read_timeout => 5)
     MultiXml.parse(resp.body)
+  rescue Excon::Errors::Timeout
+    raise Errno::ETIMEDOUT
   end
 end
 
@@ -135,7 +139,7 @@ end
 
 def jmxinfo_to_attrs(jmxinfo)
   attrs = {}
-  jmxinfo.body['MBean']['Attribute'].each do |attr|
+  jmxinfo['MBean']['Attribute'].each do |attr|
     next if attr['isnull'] != 'false'
     if ['long', 'int'].include?(attr['type'])
       attrs[attr['name']] = Integer(attr['value'])
