@@ -115,26 +115,17 @@ def with_children(path, &blk)
   kids[:children].each {|k| yield(k, "#{path}/#{k}") }
 end
 
-def http(host)
-  Faraday.new("http://#{host}:8082") do |conn|
-    conn.response :xml
-
-    #conn.adapter Faraday.default_adapter
-    conn.adapter :excon
-  end
+def http(host, path)
+  Excon.new(URI.parse("#{host}/#{path}").to_s)
 end
 
 def bean_lookup(host, beanname)
   begin
-    http(host).get("/mbean") do |req|
-      req.params = { :objectname => beanname, :template  => 'identity' }
-      req.options[:timeout] = 5
-      req.options[:open_timeout] = 3
-    end
-  rescue Faraday::Error::TimeoutError
-    raise Errno::ETIMEDOUT
-  rescue Faraday::Error::ConnectionFailed
-    raise Errno::EHOSTUNREACH
+    conn = http(host, "/mbean")
+    resp = conn.get(:query => {:objectname => beanname, :template  => 'identity' },
+                    :read_timeout => 5,
+                    :open_timeout => 3)
+    MultiXml.parse(resp.body)
   end
 end
 
