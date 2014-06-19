@@ -7,12 +7,16 @@ require 'faraday_middleware'
 require 'kafka'
 require 'excon'
 require 'multi_xml'
+require 'aws'
 
 require 'librato/metrics'
 
 $:.unshift File.join(File.dirname(__FILE__), '../lib')
 
 require 'librato-storm-kafka'
+
+# force nokogiri
+MultiXml.parser = :nokogiri
 
 parser = Trollop::Parser.new do
   version "librato-storm-kafka version %s" %
@@ -57,6 +61,26 @@ parser = Trollop::Parser.new do
   opt :zk_prefix, "Prefix path in ZK to find consumers", {
     :default => "/kafkastorm"
   }
+
+  opt :create_aws_custom_metrics, "Whether or not AWS custom metrics should also be submitted", {
+    :type => :boolean, :default => false
+  }
+
+  opt :aws_access_key_id, "AWS access key id for custom metrics", {
+    :type => :string, :default => ENV['AWS_ACCESS_KEY_ID']
+  }
+
+  opt :aws_secret_access_key, "AWS secret access key for custom metrics", {
+    :type => :string, :default => ENV['AWS_SECRET_ACCESS_KEY']
+  }
+
+  opt :aws_namespace, "AWS namespace for the custom metric", {
+    :type => :string, :default => "storm-kafka"
+  }
+
+  opt :debug, "Enable debug logging", {
+    :type => :boolean, :default => false
+  }
 end
 
 opts = Trollop::with_standard_exception_handling(parser) do
@@ -84,6 +108,7 @@ end
 
 $parts = []
 $queues = []
+$custom_metrics = []
 $threads = []
 $mutex = Mutex.new
 
@@ -96,6 +121,14 @@ zk_connect_str = opts[:zk_servers].split(",").
   map {|s| "#{s}:#{opts[:zk_port]}"}.join(",")
 
 $z = Zookeeper.new(zk_connect_str)
+
+$enable_logging = opts.debug
+def log(msg)
+  return unless $enable_logging
+  $mutex.lock
+  puts msg
+  $mutex.unlock
+end
 
 def submit(q)
   begin
@@ -128,7 +161,8 @@ def bean_lookup(host, beanname)
     resp = conn.get(:query => {:objectname => beanname, :template  => 'identity' },
                     :read_timeout => 5)
     MultiXml.parse(resp.body)
-  rescue Excon::Errors::Timeout
+  rescue Excon::Errors::Timeout => e
+    log "Could not get response from bean lookup: #{e.inspect}"
     raise Errno::ETIMEDOUT
   end
 end
@@ -165,12 +199,14 @@ def do_thr()
     break if work.nil?
 
     begin
-      q = monitor_partition(work)
-    rescue Errno::ETIMEDOUT, Errno::EHOSTUNREACH
+      q, custom_metrics = monitor_partition(work)
+    rescue Errno::ETIMEDOUT, Errno::EHOSTUNREACH => e
+      log "Could not monitor partition: #{e.inspect}"
     end
 
     $mutex.lock
     $queues << q
+    $custom_metrics << custom_metrics
     $mutex.unlock
   end
   ret
@@ -178,11 +214,16 @@ end
 
 def add_monitor_partition(hosts, opts, part, pfx = "")
   work = {}
-  q = $client.new_queue({ :prefix => "#{pfx}#{opts[:prefix]}topics.#{part['topology']['name']}.#{part['topic']}",
-                          :source => "#{part['broker']['host']}_#{part['partition']}", :skip_measurement_times => true})
+  metric_prefix = "#{pfx}#{opts[:prefix]}topics.#{part['topology']['name']}.#{part['topic']}"
+  source = "#{part['broker']['host']}_#{part['partition']}"
+  log "Adding monitor partition metric_prefix=#{metric_prefix} source=#{source}"
+  q = $client.new_queue({ :prefix => metric_prefix, :source => source, :skip_measurement_times => true})
 
   work = {
     :queue => q,
+    :custom_metrics => [],
+    :custom_metric_prefix => metric_prefix,
+    :custom_metric_source => source,
     :hosts => hosts,
     :opts => opts,
     :part => part,
@@ -195,13 +236,14 @@ def add_monitor_partition(hosts, opts, part, pfx = "")
 end
 
 def monitor_partition(work)
-  #def monitor_partition(submit_queue, hosts, opts, part, pfx = "")
-
   q = work[:queue]
   hosts = work[:hosts]
   opts = work[:opts]
   part = work[:part]
   pfx = work[:pfx]
+  custom_metrics = work[:custom_metrics]
+  custom_metric_prefix = work[:custom_metric_prefix]
+  custom_metric_source = work[:custom_metric_source]
 
   jmxinfo = partition_bean_lookup(part['broker']['host'],
                                   part['topic'], part['partition'])
@@ -210,26 +252,30 @@ def monitor_partition(work)
 
   attrs = jmxinfo_to_attrs(jmxinfo)
 
-  #puts "part: #{part.inspect}"
-  #puts "attrs: #{attrs.inspect}"
-
   consumer = Kafka::Consumer.new({ :host => part['broker']['host'],
                                    :topic => part['topic'],
                                    :partition => part['partition']})
   endoffset = consumer.fetch_latest_offset
 
-  #q = $client.new_queue({ :prefix => "#{pfx}#{opts[:prefix]}topics.#{part['topology']['name']}.#{part['topic']}",
-  #                        :source => "#{part['broker']['host']}_#{part['partition']}", :skip_measurement_times => true})
-
   q.add :bytes_vol => {:value => endoffset, :type => :counter}
+
   diff = endoffset > part['offset'] ? endoffset - part['offset'] : 0
-  q.add :pending_bytes => {:value => diff}
+  q.add(:pending_bytes => { :value => diff })
+
+  if opts.create_aws_custom_metrics
+    custom_metrics << {
+      :prefix => custom_metric_prefix,
+      :source => custom_metric_source,
+      :name => "pending_bytes",
+      :value => diff
+    }
+  end
 
   if attrs['NumAppendedMessages'] > 0
     q.add :msg_vol => {:value => attrs['NumAppendedMessages'], :type => :counter}
   end
 
-  q
+  [q, custom_metrics]
 end
 
 partitions = 0
@@ -248,7 +294,6 @@ with_children(opts[:zk_prefix]) do |spout, fullsp|
     body = JSON.parse(partinfo[:data])
     tmppfx = ""
 
-    #monitor_partition(submit_queue, hosts, opts, body, tmppfx)
     add_monitor_partition(hosts, opts, body, tmppfx)
     partitions += 1
   end
@@ -274,6 +319,25 @@ $queues.each do |q|
 
   if submit_queue.size >= 300
     submit(submit_queue)
+  end
+end
+
+if opts.create_aws_custom_metrics && !$custom_metrics.empty?
+  cw = AWS::CloudWatch.new(:access_key_id => opts.aws_access_key_id, :secret_access_key => opts.aws_secret_access_key).client
+  metric_data = $custom_metrics.flatten.compact.inject([]) do |arr, metric|
+    arr << {
+      :dimensions => [ {:name => "source", :value => metric[:source]} ],
+      :metric_name => "#{metric[:prefix]}.#{metric[:name]}",
+      :value => metric[:value]
+    }
+    arr
+  end
+  # break into groups of 20 things
+  metric_data.each_slice(20) do |data|
+    if !data.empty?
+      log "Submitting #{data.size} custom metrics"
+      cw.put_metric_data({ :namespace => opts.aws_namespace, :metric_data => data })
+    end
   end
 end
 
