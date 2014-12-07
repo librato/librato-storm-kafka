@@ -217,7 +217,7 @@ def do_thr()
   ret
 end
 
-def add_monitor_partition(hosts, opts, part, pfx = "")
+def add_monitor_partition(opts, part, pfx = "")
   work = {}
   metric_prefix = "#{pfx}#{opts[:prefix]}topics.#{part['topology']['name']}.#{part['topic']}"
   source = "#{part['broker']['host']}_#{part['partition']}"
@@ -228,7 +228,6 @@ def add_monitor_partition(hosts, opts, part, pfx = "")
     :queue => q,
     :custom_metric_prefix => metric_prefix,
     :custom_metric_source => source,
-    :hosts => hosts,
     :opts => opts,
     :part => part,
     :pfx => pfx
@@ -241,7 +240,6 @@ end
 
 def monitor_partition(work)
   q = work[:queue]
-  hosts = work[:hosts]
   opts = work[:opts]
   part = work[:part]
   pfx = work[:pfx]
@@ -249,14 +247,13 @@ def monitor_partition(work)
   custom_metric_prefix = work[:custom_metric_prefix]
   custom_metric_source = work[:custom_metric_source]
 
-  jmxinfo = partition_bean_lookup(part['broker']['host'],
+  host = part['broker']['host']
+  jmxinfo = partition_bean_lookup(host,
                                   part['topic'], part['partition'])
-
-  hosts[part['broker']['host']] = 1
 
   attrs = jmxinfo_to_attrs(jmxinfo)
 
-  consumer = Kafka::Consumer.new({ :host => part['broker']['host'],
+  consumer = Kafka::Consumer.new({ :host => host,
                                    :topic => part['topic'],
                                    :partition => part['partition']})
   endoffset = consumer.fetch_latest_offset
@@ -279,11 +276,10 @@ def monitor_partition(work)
     q.add :msg_vol => {:value => attrs['NumAppendedMessages'], :type => :counter}
   end
 
-  {:queue => q, :custom_metrics => custom_metrics}
+  {:queue => q, :custom_metrics => custom_metrics, :host => host}
 end
 
 partitions = 0
-hosts = {}
 submit_queue = $client.new_queue(:measure_time => $mt, :autosubmit_count => 300, :skip_measurement_times => true)
 with_children(opts[:zk_prefix]) do |spout, fullsp|
   with_children(fullsp) do |part, fullpart|
@@ -298,7 +294,7 @@ with_children(opts[:zk_prefix]) do |spout, fullsp|
     body = JSON.parse(partinfo[:data])
     tmppfx = ""
 
-    add_monitor_partition(hosts, opts, body, tmppfx)
+    add_monitor_partition(opts, body, tmppfx)
     partitions += 1
   end
 end
@@ -318,10 +314,12 @@ $threads.each do |thr|
   end
 end
 
+hosts = {}
 $custom_metrics = []
 $completed.each do |comp|
   submit_queue.merge!(comp[:queue])
   $custom_metrics << comp[:custom_metrics]
+  hosts[comp[:host]] = 1
 
   if submit_queue.size >= 300
     submit(submit_queue)
