@@ -133,12 +133,12 @@ def log(msg)
   $mutex.unlock
 end
 
-# Returns time of block in milliseconds
+# Returns time of block in seconds
 def time_block
   startt = Time.now
   yield
   endt = Time.now
-  (endt - startt) * 1000.0
+  endt - startt
 end
 
 def submit(q)
