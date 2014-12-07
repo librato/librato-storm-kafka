@@ -165,8 +165,11 @@ def bean_lookup(host, beanname)
     resp = conn.get(:query => {:objectname => beanname, :template  => 'identity' },
                     :read_timeout => 5)
     MultiXml.parse(resp.body)
+  rescue Excon::Errors::SocketError => e
+    log "Socket error when connecting to #{host}: #{e.inspect}"
+    raise e
   rescue Excon::Errors::Timeout => e
-    log "Could not get response from bean lookup: #{e.inspect}"
+    log "Could not get response from bean lookup from #{host}: #{e.inspect}"
     raise Errno::ETIMEDOUT
   end
 end
