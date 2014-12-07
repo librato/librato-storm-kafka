@@ -111,9 +111,8 @@ if opts[:floor_in_secs]
 end
 
 $parts = []
-$queues = []
-$custom_metrics = []
 $threads = []
+$completed = []
 $mutex = Mutex.new
 
 endpoint = "https://#{opts[:api]}"
@@ -206,14 +205,13 @@ def do_thr()
     break if work.nil?
 
     begin
-      q, custom_metrics = monitor_partition(work)
+      work = monitor_partition(work)
     rescue Errno::ETIMEDOUT, Errno::EHOSTUNREACH => e
       log "Could not monitor partition: #{e.inspect}"
     end
 
     $mutex.lock
-    $queues << q
-    $custom_metrics << custom_metrics
+    $completed << work
     $mutex.unlock
   end
   ret
@@ -228,7 +226,6 @@ def add_monitor_partition(hosts, opts, part, pfx = "")
 
   work = {
     :queue => q,
-    :custom_metrics => [],
     :custom_metric_prefix => metric_prefix,
     :custom_metric_source => source,
     :hosts => hosts,
@@ -248,7 +245,7 @@ def monitor_partition(work)
   opts = work[:opts]
   part = work[:part]
   pfx = work[:pfx]
-  custom_metrics = work[:custom_metrics]
+  custom_metrics = []
   custom_metric_prefix = work[:custom_metric_prefix]
   custom_metric_source = work[:custom_metric_source]
 
@@ -282,7 +279,7 @@ def monitor_partition(work)
     q.add :msg_vol => {:value => attrs['NumAppendedMessages'], :type => :counter}
   end
 
-  [q, custom_metrics]
+  {:queue => q, :custom_metrics => custom_metrics}
 end
 
 partitions = 0
@@ -321,8 +318,10 @@ $threads.each do |thr|
   end
 end
 
-$queues.each do |q|
-  submit_queue.merge!(q)
+$custom_metrics = []
+$completed.each do |comp|
+  submit_queue.merge!(comp[:queue])
+  $custom_metrics << comp[:custom_metrics]
 
   if submit_queue.size >= 300
     submit(submit_queue)
