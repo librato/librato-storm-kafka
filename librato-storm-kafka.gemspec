@@ -22,9 +22,11 @@ Gem::Specification.new do |s|
   s.add_runtime_dependency "librato-metrics"
   s.add_runtime_dependency "trollop"
   s.add_runtime_dependency "yajl-ruby"
+  s.add_runtime_dependency "excon"
   s.add_runtime_dependency "faraday_middleware"
   s.add_runtime_dependency "multi_xml"
   s.add_runtime_dependency "kafka-rb"
+  s.add_runtime_dependency "aws-sdk"
 
   s.add_development_dependency "rake"
 

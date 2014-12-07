@@ -53,6 +53,10 @@ $ librato-storm-kafka  --email <librato email>
                    specified as a value in seconds, will floor the
                    time by this value. For example, 300 would floor
                    all measure times to the 5 minute mark.
+* `create_aws_custom_metrics`: Boolean (default false) to create pending_bytes custom metrics
+* `aws_access_key_id`: The AWS access key if using custom metrics (defaults to `ENV['AWS_ACCESS_KEY_ID']`)
+* `aws_secret_access_key`: The AWS secret key if using custom metrics (defaults to `ENV['AWS_SECRET_ACCESS_KEY']`)
+* `aws_namespace`: The AWS namespace to use for custom metrics (defaults to `storm-kafka`)
 
 ## Screenshots
 
