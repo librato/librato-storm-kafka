@@ -133,6 +133,14 @@ def log(msg)
   $mutex.unlock
 end
 
+# Returns time of block in milliseconds
+def time_block
+  startt = Time.now
+  yield
+  endt = Time.now
+  (endt - startt) * 1000.0
+end
+
 def submit(q)
   begin
     q.submit
@@ -248,15 +256,22 @@ def monitor_partition(work)
   custom_metric_source = work[:custom_metric_source]
 
   host = part['broker']['host']
-  jmxinfo = partition_bean_lookup(host,
-                                  part['topic'], part['partition'])
+
+  jmxinfo = nil
+  jmx_time = time_block do
+    jmxinfo = partition_bean_lookup(host,
+                                    part['topic'], part['partition'])
+  end
 
   attrs = jmxinfo_to_attrs(jmxinfo)
 
-  consumer = Kafka::Consumer.new({ :host => host,
-                                   :topic => part['topic'],
-                                   :partition => part['partition']})
-  endoffset = consumer.fetch_latest_offset
+  endoffset = nil
+  kafka_time = time_block do
+    consumer = Kafka::Consumer.new({ :host => host,
+                                     :topic => part['topic'],
+                                     :partition => part['partition']})
+    endoffset = consumer.fetch_latest_offset
+  end
 
   q.add :bytes_vol => {:value => endoffset, :type => :counter}
 
@@ -276,7 +291,7 @@ def monitor_partition(work)
     q.add :msg_vol => {:value => attrs['NumAppendedMessages'], :type => :counter}
   end
 
-  {:queue => q, :custom_metrics => custom_metrics, :host => host}
+  {:queue => q, :custom_metrics => custom_metrics, :host => host, :jmx_time => jmx_time, :kafka_time => kafka_time}
 end
 
 partitions = 0
@@ -314,12 +329,16 @@ $threads.each do |thr|
   end
 end
 
+times_aggregator = Librato::Metrics::Aggregator.new(:client => $client, :prefix => opts[:prefix], :measure_time => $mt)
 hosts = {}
 $custom_metrics = []
 $completed.each do |comp|
   submit_queue.merge!(comp[:queue])
   $custom_metrics << comp[:custom_metrics]
   hosts[comp[:host]] = 1
+
+  times_aggregator.add 'jmx.time' => {value: comp[:jmx_time], source: comp[:host]}
+  times_aggregator.add 'kafka.time' => {value: comp[:kafka_time], source: comp[:host]}
 
   if submit_queue.size >= 300
     submit(submit_queue)
@@ -343,7 +362,10 @@ if opts.create_aws_custom_metrics && !$custom_metrics.empty?
   metric_data.each_slice(20) do |data|
     if !data.empty?
       log "Submitting #{data.size} custom metrics"
-      cw.put_metric_data({ :namespace => opts.aws_namespace, :metric_data => data })
+      t = time_block do
+        cw.put_metric_data({ :namespace => opts.aws_namespace, :metric_data => data })
+      end
+      times_aggregator.add 'cloudwatch.time' => {value: t}
     end
   end
 end
@@ -356,7 +378,12 @@ hosts.each_pair do |host, v|
   q = $client.new_queue({ :prefix => "#{opts[:prefix]}hosts",
                           :source => "#{host}", :skip_measurement_times => true})
   begin
-    jmxinfo = bean_lookup(host, "kafka:type=kafka.BrokerAllTopicStat")
+    jmxinfo = nil
+    t = time_block do
+      jmxinfo = bean_lookup(host, "kafka:type=kafka.BrokerAllTopicStat")
+    end
+    times_aggregator.add 'jmx.time' => {value: t, source: host}
+
     attrs = jmxinfo_to_attrs(jmxinfo)
     q.add :bytes_in => {:value => attrs['BytesIn'], :type => :counter}
     q.add :bytes_out => {:value => attrs['BytesOut'], :type => :counter}
@@ -364,7 +391,12 @@ hosts.each_pair do |host, v|
     q.add :failed_produce_request => {:value => attrs['FailedProduceRequest'], :type => :counter}
     q.add :messages_in => {:value => attrs['MessagesIn'], :type => :counter}
 
-    jmxinfo = bean_lookup(host, "java.lang:type=Memory")
+    jmxinfo = nil
+    t = time_block do
+      jmxinfo = bean_lookup(host, "java.lang:type=Memory")
+    end
+    times_aggregator.add 'jmx.time' => {value: t, source: host}
+
     attrs = jmxinfo_to_attrs(jmxinfo)
     attrs.each_pair do |name, values|
       next unless name =~ /HeapMemory/
@@ -387,6 +419,7 @@ $end_time = Time.now
 submit_queue.add "#{opts[:prefix]}run_time" => {:value => ($end_time - $start_time)}
 
 submit(submit_queue)
+times_aggregator.submit
 
 # Local Variables:
 # mode: ruby
