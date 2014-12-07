@@ -329,7 +329,7 @@ $threads.each do |thr|
   end
 end
 
-times_aggregator = Librato::Metrics::Aggregator.new(:client => $client, :prefix => opts[:prefix], :measure_time => $mt)
+times_aggregator = Librato::Metrics::Aggregator.new(:client => $client, :prefix => opts[:prefix].gsub(/\.$/, ""), :measure_time => $mt)
 hosts = {}
 $custom_metrics = []
 $completed.each do |comp|
