@@ -337,8 +337,8 @@ $completed.each do |comp|
   $custom_metrics << comp[:custom_metrics]
   hosts[comp[:host]] = 1
 
-  times_aggregator.add 'jmx_time' => {value: comp[:jmx_time], source: comp[:host]}
-  times_aggregator.add 'kafka_time' => {value: comp[:kafka_time], source: comp[:host]}
+  times_aggregator.add 'jmx_time' => {value: comp[:jmx_time], source: comp[:host]} if comp[:jmx_time]
+  times_aggregator.add 'kafka_time' => {value: comp[:kafka_time], source: comp[:host]}  if comp[:kafka_time]
 
   if submit_queue.size >= 300
     submit(submit_queue)
