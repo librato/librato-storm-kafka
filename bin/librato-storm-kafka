@@ -393,6 +393,17 @@ hosts.each_pair do |host, v|
 
     jmxinfo = nil
     t = time_block do
+      jmxinfo = bean_lookup(host, "kafka:type=kafka.LogFlushStats")
+    end
+    times_aggregator.add 'jmx_time' => {value: t, source: host}
+
+    attrs = jmxinfo_to_attrs(jmxinfo)
+    q.add :num_flushes => {:value => attrs['NumFlushes'], :type => :counter}
+    q.add :total_flush_ms => {:value => attrs['TotalFlushMs'], :type => :counter}
+    q.add :max_flush_ms => {:value => attrs['MaxFlushMs'], :type => :gauge}
+
+    jmxinfo = nil
+    t = time_block do
       jmxinfo = bean_lookup(host, "java.lang:type=Memory")
     end
     times_aggregator.add 'jmx_time' => {value: t, source: host}
