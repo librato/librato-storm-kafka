@@ -111,9 +111,8 @@ if opts[:floor_in_secs]
 end
 
 $parts = []
-$queues = []
-$custom_metrics = []
 $threads = []
+$completed = []
 $mutex = Mutex.new
 
 endpoint = "https://#{opts[:api]}"
@@ -132,6 +131,14 @@ def log(msg)
   $mutex.lock
   puts msg
   $mutex.unlock
+end
+
+# Returns time of block in seconds
+def time_block
+  startt = Time.now
+  yield
+  endt = Time.now
+  endt - startt
 end
 
 def submit(q)
@@ -165,8 +172,11 @@ def bean_lookup(host, beanname)
     resp = conn.get(:query => {:objectname => beanname, :template  => 'identity' },
                     :read_timeout => 5)
     MultiXml.parse(resp.body)
+  rescue Excon::Errors::SocketError => e
+    log "Socket error when connecting to #{host}: #{e.inspect}"
+    raise e
   rescue Excon::Errors::Timeout => e
-    log "Could not get response from bean lookup: #{e.inspect}"
+    log "Could not get response from bean lookup from #{host}: #{e.inspect}"
     raise Errno::ETIMEDOUT
   end
 end
@@ -203,20 +213,19 @@ def do_thr()
     break if work.nil?
 
     begin
-      q, custom_metrics = monitor_partition(work)
+      work = monitor_partition(work)
     rescue Errno::ETIMEDOUT, Errno::EHOSTUNREACH => e
       log "Could not monitor partition: #{e.inspect}"
     end
 
     $mutex.lock
-    $queues << q
-    $custom_metrics << custom_metrics
+    $completed << work
     $mutex.unlock
   end
   ret
 end
 
-def add_monitor_partition(hosts, opts, part, pfx = "")
+def add_monitor_partition(opts, part, pfx = "")
   work = {}
   metric_prefix = "#{pfx}#{opts[:prefix]}topics.#{part['topology']['name']}.#{part['topic']}"
   source = "#{part['broker']['host']}_#{part['partition']}"
@@ -225,10 +234,8 @@ def add_monitor_partition(hosts, opts, part, pfx = "")
 
   work = {
     :queue => q,
-    :custom_metrics => [],
     :custom_metric_prefix => metric_prefix,
     :custom_metric_source => source,
-    :hosts => hosts,
     :opts => opts,
     :part => part,
     :pfx => pfx
@@ -241,25 +248,30 @@ end
 
 def monitor_partition(work)
   q = work[:queue]
-  hosts = work[:hosts]
   opts = work[:opts]
   part = work[:part]
   pfx = work[:pfx]
-  custom_metrics = work[:custom_metrics]
+  custom_metrics = []
   custom_metric_prefix = work[:custom_metric_prefix]
   custom_metric_source = work[:custom_metric_source]
 
-  jmxinfo = partition_bean_lookup(part['broker']['host'],
-                                  part['topic'], part['partition'])
+  host = part['broker']['host']
 
-  hosts[part['broker']['host']] = 1
+  jmxinfo = nil
+  jmx_time = time_block do
+    jmxinfo = partition_bean_lookup(host,
+                                    part['topic'], part['partition'])
+  end
 
   attrs = jmxinfo_to_attrs(jmxinfo)
 
-  consumer = Kafka::Consumer.new({ :host => part['broker']['host'],
-                                   :topic => part['topic'],
-                                   :partition => part['partition']})
-  endoffset = consumer.fetch_latest_offset
+  endoffset = nil
+  kafka_time = time_block do
+    consumer = Kafka::Consumer.new({ :host => host,
+                                     :topic => part['topic'],
+                                     :partition => part['partition']})
+    endoffset = consumer.fetch_latest_offset
+  end
 
   q.add :bytes_vol => {:value => endoffset, :type => :counter}
 
@@ -279,11 +291,10 @@ def monitor_partition(work)
     q.add :msg_vol => {:value => attrs['NumAppendedMessages'], :type => :counter}
   end
 
-  [q, custom_metrics]
+  {:queue => q, :custom_metrics => custom_metrics, :host => host, :jmx_time => jmx_time, :kafka_time => kafka_time}
 end
 
 partitions = 0
-hosts = {}
 submit_queue = $client.new_queue(:measure_time => $mt, :autosubmit_count => 300, :skip_measurement_times => true)
 with_children(opts[:zk_prefix]) do |spout, fullsp|
   with_children(fullsp) do |part, fullpart|
@@ -298,7 +309,7 @@ with_children(opts[:zk_prefix]) do |spout, fullsp|
     body = JSON.parse(partinfo[:data])
     tmppfx = ""
 
-    add_monitor_partition(hosts, opts, body, tmppfx)
+    add_monitor_partition(opts, body, tmppfx)
     partitions += 1
   end
 end
@@ -318,8 +329,16 @@ $threads.each do |thr|
   end
 end
 
-$queues.each do |q|
-  submit_queue.merge!(q)
+times_aggregator = Librato::Metrics::Aggregator.new(:client => $client, :prefix => opts[:prefix].gsub(/\.$/, ""), :measure_time => $mt)
+hosts = {}
+$custom_metrics = []
+$completed.each do |comp|
+  submit_queue.merge!(comp[:queue])
+  $custom_metrics << comp[:custom_metrics]
+  hosts[comp[:host]] = 1
+
+  times_aggregator.add 'jmx_time' => {value: comp[:jmx_time], source: comp[:host]} if comp[:jmx_time]
+  times_aggregator.add 'kafka_time' => {value: comp[:kafka_time], source: comp[:host]}  if comp[:kafka_time]
 
   if submit_queue.size >= 300
     submit(submit_queue)
@@ -343,7 +362,10 @@ if opts.create_aws_custom_metrics && !$custom_metrics.empty?
   metric_data.each_slice(20) do |data|
     if !data.empty?
       log "Submitting #{data.size} custom metrics"
-      cw.put_metric_data({ :namespace => opts.aws_namespace, :metric_data => data })
+      t = time_block do
+        cw.put_metric_data({ :namespace => opts.aws_namespace, :metric_data => data })
+      end
+      times_aggregator.add 'cloudwatch_time' => {value: t}
     end
   end
 end
@@ -356,7 +378,12 @@ hosts.each_pair do |host, v|
   q = $client.new_queue({ :prefix => "#{opts[:prefix]}hosts",
                           :source => "#{host}", :skip_measurement_times => true})
   begin
-    jmxinfo = bean_lookup(host, "kafka:type=kafka.BrokerAllTopicStat")
+    jmxinfo = nil
+    t = time_block do
+      jmxinfo = bean_lookup(host, "kafka:type=kafka.BrokerAllTopicStat")
+    end
+    times_aggregator.add 'jmx_time' => {value: t, source: host}
+
     attrs = jmxinfo_to_attrs(jmxinfo)
     q.add :bytes_in => {:value => attrs['BytesIn'], :type => :counter}
     q.add :bytes_out => {:value => attrs['BytesOut'], :type => :counter}
@@ -364,7 +391,12 @@ hosts.each_pair do |host, v|
     q.add :failed_produce_request => {:value => attrs['FailedProduceRequest'], :type => :counter}
     q.add :messages_in => {:value => attrs['MessagesIn'], :type => :counter}
 
-    jmxinfo = bean_lookup(host, "java.lang:type=Memory")
+    jmxinfo = nil
+    t = time_block do
+      jmxinfo = bean_lookup(host, "java.lang:type=Memory")
+    end
+    times_aggregator.add 'jmx_time' => {value: t, source: host}
+
     attrs = jmxinfo_to_attrs(jmxinfo)
     attrs.each_pair do |name, values|
       next unless name =~ /HeapMemory/
@@ -387,6 +419,7 @@ $end_time = Time.now
 submit_queue.add "#{opts[:prefix]}run_time" => {:value => ($end_time - $start_time)}
 
 submit(submit_queue)
+times_aggregator.submit
 
 # Local Variables:
 # mode: ruby
