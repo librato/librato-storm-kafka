@@ -402,6 +402,19 @@ hosts.each_pair do |host, v|
     q.add :total_flush_ms => {:value => attrs['TotalFlushMs'], :type => :counter}
     q.add :max_flush_ms => {:value => attrs['MaxFlushMs'], :type => :gauge}
 
+    ["PS Scavenge", "PS MarkSweep"].each do |collector|
+      jmxinfo = nil
+      t = time_block do
+        jmxinfo = bean_lookup(host, "java.lang:type=GarbageCollector,name=#{collector}")
+      end
+      times_aggregator.add 'jmx_time' => {value: t, source: host}
+
+      gcname = collector.gsub(" ", "_")
+      attrs = jmxinfo_to_attrs(jmxinfo)
+      q.add :"gc.#{gcname}.collection.count" => {:value => attrs['CollectionCount'], :type => :counter}
+      q.add :"gc.#{gcname}.collection.time" => {:value => attrs['CollectionTime'], :type => :counter}
+    end
+
     jmxinfo = nil
     t = time_block do
       jmxinfo = bean_lookup(host, "java.lang:type=Memory")
