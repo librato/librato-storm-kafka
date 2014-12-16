@@ -275,6 +275,7 @@ def monitor_partition(work)
                                      :topic => part['topic'],
                                      :partition => part['partition']})
     endoffset = consumer.fetch_latest_offset
+    consumer.disconnect
   end
 
   q.add :bytes_vol => {:value => endoffset, :type => :counter}
