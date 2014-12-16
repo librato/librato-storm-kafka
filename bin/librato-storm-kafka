@@ -406,7 +406,7 @@ hosts.each_pair do |host, v|
     q.add :total_flush_ms => {:value => attrs['TotalFlushMs'], :type => :counter}
     q.add :max_flush_ms => {:value => attrs['MaxFlushMs'], :type => :gauge}
 
-    ["PS Scavenge", "PS MarkSweep"].each do |collector|
+    ["Copy", "PS Scavenge", "PS MarkSweep"].each do |collector|
       jmxinfo = nil
       t = time_block do
         jmxinfo = bean_lookup(host, "java.lang:type=GarbageCollector,name=#{collector}")
