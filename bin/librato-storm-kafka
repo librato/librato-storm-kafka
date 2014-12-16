@@ -171,7 +171,11 @@ def bean_lookup(host, beanname)
     conn = http(host, "/mbean")
     resp = conn.get(:query => {:objectname => beanname, :template  => 'identity' },
                     :read_timeout => 5)
-    MultiXml.parse(resp.body)
+    body = resp.body
+    unless body.include?("<MBean")
+      return nil
+    end
+    MultiXml.parse(body)
   rescue Excon::Errors::SocketError => e
     log "Socket error when connecting to #{host}: #{e.inspect}"
     raise e
@@ -409,6 +413,7 @@ hosts.each_pair do |host, v|
       end
       times_aggregator.add 'jmx_time' => {value: t, source: host}
 
+      next unless jmxinfo
       gcname = collector.gsub(" ", "_")
       attrs = jmxinfo_to_attrs(jmxinfo)
       q.add :"gc.#{gcname}.collection.count" => {:value => attrs['CollectionCount'], :type => :counter}
