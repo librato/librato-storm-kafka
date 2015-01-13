@@ -315,14 +315,15 @@ def get_active_brokers(opts)
 
     # eg: 10.151.5.190-1421179184361:10.151.5.190:9092
     sp = brokerinfo[:data].split(":")
-    brokers["#{sp[1]}:#{sp[2]}"] = true
+    brokstr = "%s:%s" % [sp[1], sp[2]]
+    brokers[brokstr] = true
   end
 
   brokers
 end
 
 brokers = get_active_brokers(opts)
-puts "brokers: #{brokers.inspect}"
+#puts "brokers: #{brokers.inspect}"
 
 partitions = 0
 submit_queue = $client.new_queue(:measure_time => $mt, :autosubmit_count => 300, :skip_measurement_times => true)
@@ -338,6 +339,9 @@ with_children(opts[:zk_prefix]) do |spout, fullsp|
 
     body = JSON.parse(partinfo[:data])
     tmppfx = ""
+
+    brokstr = "%s:%d" % [body['broker']['host'], body['broker']['port']]
+    next unless brokers[brokstr]
 
     add_monitor_partition(opts, body, tmppfx)
     partitions += 1
