@@ -62,6 +62,10 @@ parser = Trollop::Parser.new do
     :default => "/kafkastorm"
   }
 
+  opt :zk_brokers, "Path to locate brokers in ZK", {
+    :default => "/brokers"
+  }
+
   opt :create_aws_custom_metrics, "Whether or not AWS custom metrics should also be submitted", {
     :type => :boolean, :default => false
   }
@@ -299,6 +303,28 @@ def monitor_partition(work)
   {:queue => q, :custom_metrics => custom_metrics, :host => host, :jmx_time => jmx_time, :kafka_time => kafka_time}
 end
 
+def get_active_brokers(opts)
+  brokers = {}
+
+  with_children("#{opts[:zk_brokers]}/ids") do |id, fullid|
+    brokerinfo = $z.get(:path => fullid)
+    if brokerinfo[:rc] != 0
+      $stderr.puts "Failed to lookup broker id: #{fullid}"
+      exit 1
+    end
+
+    # eg: 10.151.5.190-1421179184361:10.151.5.190:9092
+    sp = brokerinfo[:data].split(":")
+    brokstr = "%s:%s" % [sp[1], sp[2]]
+    brokers[brokstr] = true
+  end
+
+  brokers
+end
+
+brokers = get_active_brokers(opts)
+#puts "brokers: #{brokers.inspect}"
+
 partitions = 0
 submit_queue = $client.new_queue(:measure_time => $mt, :autosubmit_count => 300, :skip_measurement_times => true)
 with_children(opts[:zk_prefix]) do |spout, fullsp|
@@ -313,6 +339,9 @@ with_children(opts[:zk_prefix]) do |spout, fullsp|
 
     body = JSON.parse(partinfo[:data])
     tmppfx = ""
+
+    brokstr = "%s:%d" % [body['broker']['host'], body['broker']['port']]
+    next unless brokers[brokstr]
 
     add_monitor_partition(opts, body, tmppfx)
     partitions += 1
