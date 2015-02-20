@@ -130,8 +130,14 @@ zk_connect_str = opts[:zk_servers].split(",").
 $z = Zookeeper.new(zk_connect_str)
 
 $enable_logging = opts.debug
-def log(msg)
+def debug_log(msg)
   return unless $enable_logging
+  $mutex.lock
+  puts msg
+  $mutex.unlock
+end
+
+def log(msg)
   $mutex.lock
   puts msg
   $mutex.unlock
@@ -246,7 +252,7 @@ def add_monitor_partition(opts, part, pfx = "")
   work = {}
   metric_prefix = "#{pfx}#{opts[:prefix]}topics.#{part['topology']['name']}.#{part['topic']}"
   source = "#{part['broker']['host']}_#{part['partition']}"
-  log "Adding monitor partition metric_prefix=#{metric_prefix} source=#{source}"
+  debug_log "Adding monitor partition metric_prefix=#{metric_prefix} source=#{source}"
   q = $client.new_queue({ :prefix => metric_prefix, :source => source, :skip_measurement_times => true})
 
   work = {
@@ -404,7 +410,7 @@ if opts.create_aws_custom_metrics && !$custom_metrics.empty?
   # break into groups of 20 things
   metric_data.each_slice(20) do |data|
     if !data.empty?
-      log "Submitting #{data.size} custom metrics"
+      debug_log "Submitting #{data.size} custom metrics"
       t = time_block do
         cw.put_metric_data({ :namespace => opts.aws_namespace, :metric_data => data })
       end
