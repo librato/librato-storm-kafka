@@ -166,13 +166,22 @@ def with_children(path, &blk)
 end
 
 def http(host, path)
-  Excon.new(URI.parse("http://#{host}:8082/#{path}").to_s,
-            :connect_timeout => 3)
+  uri = URI.parse("http://#{host}:8082/#{path}") rescue nil
+  unless uri
+    puts "Unable to parse host '#{host}' and path '#{path}'"
+    return nil
+  end
+
+  Excon.new(uri.to_s, :connect_timeout => 3)
 end
 
 def bean_lookup(host, beanname)
   begin
     conn = http(host, "/mbean")
+    unless conn
+      return nil
+    end
+
     resp = conn.get(:query => {:objectname => beanname, :template  => 'identity' },
                     :read_timeout => 5)
     body = resp.body
