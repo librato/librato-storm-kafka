@@ -433,6 +433,8 @@ hosts.each_pair do |host, v|
     end
     times_aggregator.add 'jmx_time' => {value: t, source: host}
 
+    next unless jmxinfo
+
     attrs = jmxinfo_to_attrs(jmxinfo)
     q.add :bytes_in => {:value => attrs['BytesIn'], :type => :counter}
     q.add :bytes_out => {:value => attrs['BytesOut'], :type => :counter}
