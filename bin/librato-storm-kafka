@@ -130,8 +130,14 @@ zk_connect_str = opts[:zk_servers].split(",").
 $z = Zookeeper.new(zk_connect_str)
 
 $enable_logging = opts.debug
-def log(msg)
+def debug_log(msg)
   return unless $enable_logging
+  $mutex.lock
+  puts msg
+  $mutex.unlock
+end
+
+def log(msg)
   $mutex.lock
   puts msg
   $mutex.unlock
@@ -166,13 +172,22 @@ def with_children(path, &blk)
 end
 
 def http(host, path)
-  Excon.new(URI.parse("http://#{host}:8082/#{path}").to_s,
-            :connect_timeout => 3)
+  uri = URI.parse("http://#{host}:8082/#{path}") rescue nil
+  unless uri
+    puts "Unable to parse host '#{host}' and path '#{path}'"
+    return nil
+  end
+
+  Excon.new(uri.to_s, :connect_timeout => 3)
 end
 
 def bean_lookup(host, beanname)
   begin
     conn = http(host, "/mbean")
+    unless conn
+      return nil
+    end
+
     resp = conn.get(:query => {:objectname => beanname, :template  => 'identity' },
                     :read_timeout => 5)
     body = resp.body
@@ -237,7 +252,7 @@ def add_monitor_partition(opts, part, pfx = "")
   work = {}
   metric_prefix = "#{pfx}#{opts[:prefix]}topics.#{part['topology']['name']}.#{part['topic']}"
   source = "#{part['broker']['host']}_#{part['partition']}"
-  log "Adding monitor partition metric_prefix=#{metric_prefix} source=#{source}"
+  debug_log "Adding monitor partition metric_prefix=#{metric_prefix} source=#{source}"
   q = $client.new_queue({ :prefix => metric_prefix, :source => source, :skip_measurement_times => true})
 
   work = {
@@ -395,7 +410,7 @@ if opts.create_aws_custom_metrics && !$custom_metrics.empty?
   # break into groups of 20 things
   metric_data.each_slice(20) do |data|
     if !data.empty?
-      log "Submitting #{data.size} custom metrics"
+      debug_log "Submitting #{data.size} custom metrics"
       t = time_block do
         cw.put_metric_data({ :namespace => opts.aws_namespace, :metric_data => data })
       end
@@ -417,6 +432,8 @@ hosts.each_pair do |host, v|
       jmxinfo = bean_lookup(host, "kafka:type=kafka.BrokerAllTopicStat")
     end
     times_aggregator.add 'jmx_time' => {value: t, source: host}
+
+    next unless jmxinfo
 
     attrs = jmxinfo_to_attrs(jmxinfo)
     q.add :bytes_in => {:value => attrs['BytesIn'], :type => :counter}
