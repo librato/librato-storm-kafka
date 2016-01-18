@@ -135,6 +135,9 @@ if opts[:honeybadger_api].to_s.length > 0
 
   require 'honeybadger'
 
+  honeybadger_config = Honeybadger::Config.new()
+  Honeybadger.start(honeybadger_config)
+
   $honeybadger_api = opts[:honeybadger_api]
 end
 
