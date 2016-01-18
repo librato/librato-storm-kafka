@@ -236,13 +236,18 @@ def do_thr()
     break if work.nil?
 
     begin
-      work = monitor_partition(work)
+      result = monitor_partition(work)
     rescue Errno::ETIMEDOUT, Errno::EHOSTUNREACH => e
       log "Could not monitor partition: #{e.inspect}"
     end
 
+    unless result
+      log "Failed to monitor partition: #{work[:part]}"
+      next
+    end
+
     $mutex.lock
-    $completed << work
+    $completed << result
     $mutex.unlock
   end
   ret
@@ -284,6 +289,10 @@ def monitor_partition(work)
   jmx_time = time_block do
     jmxinfo = partition_bean_lookup(host,
                                     part['topic'], part['partition'])
+  end
+
+  unless jmxinfo
+    return nil
   end
 
   attrs = jmxinfo_to_attrs(jmxinfo)
