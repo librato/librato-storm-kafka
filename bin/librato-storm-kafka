@@ -242,7 +242,7 @@ def do_thr()
     end
 
     unless result
-      log "Failed to monitor partition: #{work}"
+      log "Failed to monitor partition: #{work[:part]}"
       next
     end
 
