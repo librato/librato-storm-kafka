@@ -7,7 +7,7 @@ require 'faraday_middleware'
 require 'kafka'
 require 'excon'
 require 'multi_xml'
-require 'aws'
+require 'aws-sdk'
 
 require 'librato/metrics'
 
@@ -86,6 +86,10 @@ parser = Trollop::Parser.new do
     :type => :boolean, :default => false
   }
 
+  opt :honeybadger_api, "Honeybadger API key", {
+    :type => :string, :default => ENV['HONEYBADGER_API_KEY']
+  }
+
   opt :debug, "Enable debug logging", {
     :type => :boolean, :default => false
   }
@@ -118,6 +122,27 @@ $parts = []
 $threads = []
 $completed = []
 $mutex = Mutex.new
+$honeybadger_api = nil
+
+if opts[:honeybadger_api].to_s.length > 0
+  ENV['HONEYBADGER_USER_INFORMER_ENABLED'] = 'false'
+  ENV['HONEYBADGER_FEEDBACK_ENABLED'] = 'false'
+
+  ENV['HONEYBADGER_METRICS_ENABLED'] = 'false'
+  ENV['HONEYBADGER_METRICS_GC_PROFILER'] = 'false'
+
+  ENV['HONEYBADGER_TRACES_ENABLED'] = 'false'
+
+  require 'honeybadger'
+
+  $honeybadger_api = opts[:honeybadger_api]
+end
+
+def honeybadger_notify(ex)
+  if $honeybadger_api
+    Honeybadger.notify(ex)
+  end
+end
 
 endpoint = "https://#{opts[:api]}"
 $client = Librato::Metrics::Client.new
@@ -251,6 +276,9 @@ def do_thr()
     $mutex.unlock
   end
   ret
+rescue Exception => e
+  honeybadger_notify(e)
+  raise e
 end
 
 def add_monitor_partition(opts, part, pfx = "")
@@ -346,167 +374,177 @@ def get_active_brokers(opts)
   brokers
 end
 
-brokers = get_active_brokers(opts)
-#puts "brokers: #{brokers.inspect}"
 
-partitions = 0
-submit_queue = $client.new_queue(:measure_time => $mt, :autosubmit_count => 300, :skip_measurement_times => true)
-with_children(opts[:zk_prefix]) do |spout, fullsp|
-  with_children(fullsp) do |part, fullpart|
-    next if part == 'user'
+def main(opts)
+  brokers = get_active_brokers(opts)
+  #puts "brokers: #{brokers.inspect}"
 
-    partinfo = $z.get(:path => fullpart)
-    if partinfo[:rc] != 0
-      $stderr.puts "Failed to lookup partition: #{fullpart}"
+  partitions = 0
+  submit_queue = $client.new_queue(:measure_time => $mt, :autosubmit_count => 300, :skip_measurement_times => true)
+  with_children(opts[:zk_prefix]) do |spout, fullsp|
+    with_children(fullsp) do |part, fullpart|
+      next if part == 'user'
+
+      partinfo = $z.get(:path => fullpart)
+      if partinfo[:rc] != 0
+        $stderr.puts "Failed to lookup partition: #{fullpart}"
+        exit 1
+      end
+
+      body = JSON.parse(partinfo[:data])
+      tmppfx = ""
+
+      brokstr = "%s:%d" % [body['broker']['host'], body['broker']['port']]
+      next unless brokers[brokstr]
+
+      add_monitor_partition(opts, body, tmppfx)
+      partitions += 1
+    end
+  end
+
+  # Start our threads to poll in parallel
+  1.upto(opts[:threads]) do
+    $threads << Thread.new do
+      do_thr
+    end
+  end
+
+  # Wait for threads to exit
+  $threads.each do |thr|
+    if !thr.value
+      $stderr.puts "Thread #{thr.inspect} returned failure!"
       exit 1
     end
-
-    body = JSON.parse(partinfo[:data])
-    tmppfx = ""
-
-    brokstr = "%s:%d" % [body['broker']['host'], body['broker']['port']]
-    next unless brokers[brokstr]
-
-    add_monitor_partition(opts, body, tmppfx)
-    partitions += 1
   end
-end
 
-# Start our threads to poll in parallel
-1.upto(opts[:threads]) do
-  $threads << Thread.new do
-    do_thr
-  end
-end
+  times_aggregator = Librato::Metrics::Aggregator.new(:client => $client, :prefix => opts[:prefix].gsub(/\.$/, ""), :measure_time => $mt)
+  hosts = {}
+  $custom_metrics = []
+  $completed.each do |comp|
+    submit_queue.merge!(comp[:queue])
+    $custom_metrics << comp[:custom_metrics]
+    hosts[comp[:host]] = 1
 
-# Wait for threads to exit
-$threads.each do |thr|
-  if !thr.value
-    $stderr.puts "Thread #{thr.inspect} returned failure!"
-    exit 1
-  end
-end
+    times_aggregator.add 'jmx_time' => {value: comp[:jmx_time], source: comp[:host]} if comp[:jmx_time]
+    times_aggregator.add 'kafka_time' => {value: comp[:kafka_time], source: comp[:host]}  if comp[:kafka_time]
 
-times_aggregator = Librato::Metrics::Aggregator.new(:client => $client, :prefix => opts[:prefix].gsub(/\.$/, ""), :measure_time => $mt)
-hosts = {}
-$custom_metrics = []
-$completed.each do |comp|
-  submit_queue.merge!(comp[:queue])
-  $custom_metrics << comp[:custom_metrics]
-  hosts[comp[:host]] = 1
-
-  times_aggregator.add 'jmx_time' => {value: comp[:jmx_time], source: comp[:host]} if comp[:jmx_time]
-  times_aggregator.add 'kafka_time' => {value: comp[:kafka_time], source: comp[:host]}  if comp[:kafka_time]
-
-  if submit_queue.size >= 300
-    submit(submit_queue)
-  end
-end
-
-if opts.create_aws_custom_metrics && !$custom_metrics.empty?
-  cw = AWS::CloudWatch.new(:access_key_id => opts.aws_access_key_id, :secret_access_key => opts.aws_secret_access_key).client
-  metric_data = $custom_metrics.flatten.compact.inject([]) do |arr, metric|
-    data = {
-      :metric_name => "#{metric[:prefix]}.#{metric[:name]}",
-      :value => metric[:value]
-    }
-    if opts.breakout_aws_custom_metrics
-      data[:dimensions] = [ {:name => "source", :value => metric[:source]} ]
+    if submit_queue.size >= 300
+      submit(submit_queue)
     end
-    arr << data
-    arr
   end
-  # break into groups of 20 things
-  metric_data.each_slice(20) do |data|
-    if !data.empty?
-      debug_log "Submitting #{data.size} custom metrics"
-      t = time_block do
-        cw.put_metric_data({ :namespace => opts.aws_namespace, :metric_data => data })
+
+  if opts.create_aws_custom_metrics && !$custom_metrics.empty?
+    cw = Aws::CloudWatch::Client.new(:access_key_id => opts.aws_access_key_id, :secret_access_key => opts.aws_secret_access_key, :region => "us-east-1")
+    metric_data = $custom_metrics.flatten.compact.inject([]) do |arr, metric|
+      data = {
+        :metric_name => "#{metric[:prefix]}.#{metric[:name]}",
+        :value => metric[:value]
+      }
+      if opts.breakout_aws_custom_metrics
+        data[:dimensions] = [ {:name => "source", :value => metric[:source]} ]
       end
-      times_aggregator.add 'cloudwatch_time' => {value: t}
+      arr << data
+      arr
+    end
+    # break into groups of 20 things
+    metric_data.each_slice(20) do |data|
+      if !data.empty?
+        debug_log "Submitting #{data.size} custom metrics"
+        t = time_block do
+          cw.put_metric_data({ :namespace => opts.aws_namespace, :metric_data => data })
+        end
+        times_aggregator.add 'cloudwatch_time' => {value: t}
+      end
     end
   end
-end
 
-submit_queue.add "#{opts[:prefix]}active_partitions" => {:value => partitions}
+  submit_queue.add "#{opts[:prefix]}active_partitions" => {:value => partitions}
 
-# Now check host-level options
-active_hosts = 0
-hosts.each_pair do |host, v|
-  q = $client.new_queue({ :prefix => "#{opts[:prefix]}hosts",
-                          :source => "#{host}", :skip_measurement_times => true})
-  begin
-    jmxinfo = nil
-    t = time_block do
-      jmxinfo = bean_lookup(host, "kafka:type=kafka.BrokerAllTopicStat")
-    end
-    times_aggregator.add 'jmx_time' => {value: t, source: host}
-
-    next unless jmxinfo
-
-    attrs = jmxinfo_to_attrs(jmxinfo)
-    q.add :bytes_in => {:value => attrs['BytesIn'], :type => :counter}
-    q.add :bytes_out => {:value => attrs['BytesOut'], :type => :counter}
-    q.add :failed_fetch_request => {:value => attrs['FailedFetchRequest'], :type => :counter}
-    q.add :failed_produce_request => {:value => attrs['FailedProduceRequest'], :type => :counter}
-    q.add :messages_in => {:value => attrs['MessagesIn'], :type => :counter}
-
-    jmxinfo = nil
-    t = time_block do
-      jmxinfo = bean_lookup(host, "kafka:type=kafka.LogFlushStats")
-    end
-    times_aggregator.add 'jmx_time' => {value: t, source: host}
-
-    if jmxinfo
-      attrs = jmxinfo_to_attrs(jmxinfo)
-      q.add :num_flushes => {:value => attrs['NumFlushes'], :type => :counter}
-      q.add :total_flush_ms => {:value => attrs['TotalFlushMs'], :type => :counter}
-      q.add :max_flush_ms => {:value => attrs['MaxFlushMs'], :type => :gauge}
-    end
-
-    ["Copy", "PS Scavenge", "PS MarkSweep"].each do |collector|
+  # Now check host-level options
+  active_hosts = 0
+  hosts.each_pair do |host, v|
+    q = $client.new_queue({ :prefix => "#{opts[:prefix]}hosts",
+                            :source => "#{host}", :skip_measurement_times => true})
+    begin
       jmxinfo = nil
       t = time_block do
-        jmxinfo = bean_lookup(host, "java.lang:type=GarbageCollector,name=#{collector}")
+        jmxinfo = bean_lookup(host, "kafka:type=kafka.BrokerAllTopicStat")
       end
       times_aggregator.add 'jmx_time' => {value: t, source: host}
 
       next unless jmxinfo
-      gcname = collector.gsub(" ", "_")
+
       attrs = jmxinfo_to_attrs(jmxinfo)
-      q.add :"gc.#{gcname}.collection.count" => {:value => attrs['CollectionCount'], :type => :counter}
-      q.add :"gc.#{gcname}.collection.time" => {:value => attrs['CollectionTime'], :type => :counter}
-    end
+      q.add :bytes_in => {:value => attrs['BytesIn'], :type => :counter}
+      q.add :bytes_out => {:value => attrs['BytesOut'], :type => :counter}
+      q.add :failed_fetch_request => {:value => attrs['FailedFetchRequest'], :type => :counter}
+      q.add :failed_produce_request => {:value => attrs['FailedProduceRequest'], :type => :counter}
+      q.add :messages_in => {:value => attrs['MessagesIn'], :type => :counter}
 
-    jmxinfo = nil
-    t = time_block do
-      jmxinfo = bean_lookup(host, "java.lang:type=Memory")
-    end
-    times_aggregator.add 'jmx_time' => {value: t, source: host}
-
-    attrs = jmxinfo_to_attrs(jmxinfo)
-    attrs.each_pair do |name, values|
-      next unless name =~ /HeapMemory/
-      values.each_pair do |attrn, attrv|
-        q.add "memory.#{name.downcase}.#{attrn.downcase}" => {:value => Integer(attrv)}
+      jmxinfo = nil
+      t = time_block do
+        jmxinfo = bean_lookup(host, "kafka:type=kafka.LogFlushStats")
       end
-    end
+      times_aggregator.add 'jmx_time' => {value: t, source: host}
 
-    active_hosts += 1
-  rescue Errno::ETIMEDOUT, Errno::EHOSTUNREACH
-    next
+      if jmxinfo
+        attrs = jmxinfo_to_attrs(jmxinfo)
+        q.add :num_flushes => {:value => attrs['NumFlushes'], :type => :counter}
+        q.add :total_flush_ms => {:value => attrs['TotalFlushMs'], :type => :counter}
+        q.add :max_flush_ms => {:value => attrs['MaxFlushMs'], :type => :gauge}
+      end
+
+      ["Copy", "PS Scavenge", "PS MarkSweep"].each do |collector|
+        jmxinfo = nil
+        t = time_block do
+          jmxinfo = bean_lookup(host, "java.lang:type=GarbageCollector,name=#{collector}")
+        end
+        times_aggregator.add 'jmx_time' => {value: t, source: host}
+
+        next unless jmxinfo
+        gcname = collector.gsub(" ", "_")
+        attrs = jmxinfo_to_attrs(jmxinfo)
+        q.add :"gc.#{gcname}.collection.count" => {:value => attrs['CollectionCount'], :type => :counter}
+        q.add :"gc.#{gcname}.collection.time" => {:value => attrs['CollectionTime'], :type => :counter}
+      end
+
+      jmxinfo = nil
+      t = time_block do
+        jmxinfo = bean_lookup(host, "java.lang:type=Memory")
+      end
+      times_aggregator.add 'jmx_time' => {value: t, source: host}
+
+      attrs = jmxinfo_to_attrs(jmxinfo)
+      attrs.each_pair do |name, values|
+        next unless name =~ /HeapMemory/
+        values.each_pair do |attrn, attrv|
+          q.add "memory.#{name.downcase}.#{attrn.downcase}" => {:value => Integer(attrv)}
+        end
+      end
+
+      active_hosts += 1
+    rescue Errno::ETIMEDOUT, Errno::EHOSTUNREACH
+      next
+    end
+    submit_queue.merge!(q)
   end
-  submit_queue.merge!(q)
+
+  submit_queue.add "#{opts[:prefix]}active_hosts" => {:value => active_hosts}
+
+  $end_time = Time.now
+
+  submit_queue.add "#{opts[:prefix]}run_time" => {:value => ($end_time - $start_time)}
+
+  submit(submit_queue)
+  times_aggregator.submit
 end
 
-submit_queue.add "#{opts[:prefix]}active_hosts" => {:value => active_hosts}
-
-$end_time = Time.now
-
-submit_queue.add "#{opts[:prefix]}run_time" => {:value => ($end_time - $start_time)}
-
-submit(submit_queue)
-times_aggregator.submit
+begin
+  main(opts)
+rescue Exception => e
+  honeybadger_notify(e)
+  raise e
+end
 
 # Local Variables:
 # mode: ruby
