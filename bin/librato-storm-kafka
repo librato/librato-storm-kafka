@@ -7,7 +7,7 @@ require 'faraday_middleware'
 require 'kafka'
 require 'excon'
 require 'multi_xml'
-require 'aws'
+require 'aws-sdk'
 
 require 'librato/metrics'
 
