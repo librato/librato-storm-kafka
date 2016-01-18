@@ -27,6 +27,7 @@ Gem::Specification.new do |s|
   s.add_runtime_dependency "multi_xml"
   s.add_runtime_dependency "kafka-rb"
   s.add_runtime_dependency "aws-sdk"
+  s.add_runtime_dependency "honeybadger"
 
   s.add_development_dependency "rake"
 

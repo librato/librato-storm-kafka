@@ -86,6 +86,10 @@ parser = Trollop::Parser.new do
     :type => :boolean, :default => false
   }
 
+  opt :honeybadger_api, "Honeybadger API key", {
+    :type => :string, :default => ENV['HONEYBADGER_API_KEY']
+  }
+
   opt :debug, "Enable debug logging", {
     :type => :boolean, :default => false
   }
@@ -118,6 +122,27 @@ $parts = []
 $threads = []
 $completed = []
 $mutex = Mutex.new
+$honeybadger_api = nil
+
+if opts[:honeybadger_api].to_s.length > 0
+  ENV['HONEYBADGER_USER_INFORMER_ENABLED'] = 'false'
+  ENV['HONEYBADGER_FEEDBACK_ENABLED'] = 'false'
+
+  ENV['HONEYBADGER_METRICS_ENABLED'] = 'false'
+  ENV['HONEYBADGER_METRICS_GC_PROFILER'] = 'false'
+
+  ENV['HONEYBADGER_TRACES_ENABLED'] = 'false'
+
+  require 'honeybadger'
+
+  $honeybadger_api = opts[:honeybadger_api]
+end
+
+def notify_honeybadger(ex)
+  if $honeybadger_api
+    Honeybadger.notify(ex)
+  end
+end
 
 endpoint = "https://#{opts[:api]}"
 $client = Librato::Metrics::Client.new
