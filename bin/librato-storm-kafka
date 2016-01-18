@@ -434,7 +434,7 @@ def main(opts)
   end
 
   if opts.create_aws_custom_metrics && !$custom_metrics.empty?
-    cw = AWS::CloudWatch.new(:access_key_id => opts.aws_access_key_id, :secret_access_key => opts.aws_secret_access_key).client
+    cw = Aws::CloudWatch::Client.new(:access_key_id => opts.aws_access_key_id, :secret_access_key => opts.aws_secret_access_key).client
     metric_data = $custom_metrics.flatten.compact.inject([]) do |arr, metric|
       data = {
         :metric_name => "#{metric[:prefix]}.#{metric[:name]}",
