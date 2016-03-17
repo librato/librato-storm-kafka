@@ -1,0 +1,123 @@
+#!/usr/bin/env ruby
+
+require 'trollop'
+require 'zookeeper'
+require 'yajl/json_gem'
+require 'faraday_middleware'
+require 'kafka'
+require 'excon'
+require 'multi_xml'
+require 'aws-sdk'
+
+require 'librato/metrics'
+
+$:.unshift File.join(File.dirname(__FILE__), '../lib')
+
+require 'librato-storm-kafka'
+
+# force nokogiri
+MultiXml.parser = :nokogiri
+
+parser = Trollop::Parser.new do
+  version "zk-path-remove version %s" %
+    [Librato::Storm::Kafka::VERSION]
+
+  opt :zk_servers, "ZooKeeper servers (comma separated)", {
+    :type => :string
+  }
+
+  opt :zk_port, "Port to connect to ZK on", {
+    :default => 2181
+  }
+
+  opt :zk_brokers, "Path to locate brokers in ZK", {
+    :default => "/brokers"
+  }
+
+  opt :remove, "Actually whether to remove", :default => false
+
+  opt :path, "Path to recursively remove from ZK", :type => :string
+end
+
+opts = Trollop::with_standard_exception_handling(parser) do
+  if ARGV.length == 0
+    raise Trollop::HelpNeeded
+  end
+
+  opts = parser.parse ARGV
+  %w{ zk_servers path }.each do |f|
+    unless opts[f.to_sym]
+      $stderr.puts "Error: Must specify option --%s." % [f]
+      puts
+      raise Trollop::HelpNeeded
+    end
+  end
+  opts
+end
+
+
+zk_connect_str = opts[:zk_servers].split(",").
+  map {|s| "#{s}:#{opts[:zk_port]}"}.join(",")
+
+$z = Zookeeper.new(zk_connect_str)
+
+def with_children(path, &blk)
+  kids = $z.get_children(:path => path)
+  if kids[:rc] != 0
+    $stderr.puts "Unable to list children at path: #{path}"
+    exit 1
+  end
+  kids[:children].each {|k| yield(k, "#{path}/#{k}") }
+end
+
+def get_node_data(path)
+  node = $z.get(:path => path)
+  if node[:rc] != 0
+    $stderr.puts "Unable to describe znode: #{path}"
+    exit 1
+  end
+
+  return {
+    :mtime => node[:stat].mtime,
+    :path => path
+  }
+end
+
+nodes = []
+
+with_children(opts[:path]) do |_, childpath|
+  nodes << get_node_data(childpath)
+end
+
+nodes << get_node_data(opts[:path])
+
+puts ">> Going to remove the following: "
+puts
+
+puts "%-80s%10s" % ["Path", "Last mtime"]
+puts "%-80s%10s" % ["---", "---- -----"]
+nodes.each do |node|
+  puts "%-80s%10s" % [node[:path], Time.at(node[:mtime] / 1000)]
+end
+
+puts
+
+unless opts[:remove]
+  puts "Not actually removing...exiting"
+  exit 0
+end
+
+puts "Sleeping for 5 seconds"
+sleep 5
+
+puts "NOW REMOVING"
+
+nodes.each do |node|
+  ret = $z.delete(:path => node[:path])
+  if ret[:rc] != 0
+    $stderr.puts "Failed to remove path: #{node[:path]}"
+    exit 1
+  end
+end
+
+puts "Done"
