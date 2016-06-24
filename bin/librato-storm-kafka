@@ -42,6 +42,10 @@ parser = Trollop::Parser.new do
     :type => :int
   }
 
+  opt :environment, "environment name to be used for metric sources", {
+    :type => :string, :default => "unknown"
+  }
+
   opt :mx4j_port, "Port to connect to MX4J on", {
     :default => 8082
   }
@@ -461,7 +465,7 @@ def main(opts)
     end
   end
 
-  submit_queue.add "#{opts[:prefix]}active_partitions" => {:value => partitions}
+  submit_queue.add "#{opts[:prefix]}active_partitions" => {:value => partitions, :source => opts[:environment]}
 
   # Now check host-level options
   active_hosts = 0
@@ -532,13 +536,13 @@ def main(opts)
     submit_queue.merge!(q)
   end
 
-  submit_queue.add "#{opts[:prefix]}active_hosts" => {:value => active_hosts}
+  submit_queue.add "#{opts[:prefix]}active_hosts" => {:value => active_hosts, :source => opts[:environment]}
 
   submit(submit_queue)
   times_aggregator.submit
 
   $end_time = Time.now
-  submit_queue.add "#{opts[:prefix]}run_time" => {:value => ($end_time - $start_time)}
+  submit_queue.add "#{opts[:prefix]}run_time" => {:value => ($end_time - $start_time), :source => opts[:environment]}
   submit(submit_queue)
 end
 
