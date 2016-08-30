@@ -34,6 +34,9 @@ parser = Trollop::Parser.new do
     :default => "/brokers"
   }
 
+  opt :older, "Match all znodes older than `old-time-secs`", :default => false
+  opt :old_time_secs, "How old znodes must be in seconds", :default => 86400 * 30 # 30 days
+
   opt :remove, "Actually whether to remove", :default => false
 
   opt :path, "Path to recursively remove from ZK", :type => :string
@@ -70,6 +73,25 @@ def with_children(path, &blk)
   kids[:children].each {|k| yield(k, "#{path}/#{k}") }
 end
 
+# Yield znode if within time constraits (if specified)
+def if_recent(znode, opts)
+  unless opts[:older]
+    yield(znode)
+    return
+  end
+
+  #puts "znode: #{znode[:path]}, now: #{Time.now.tv_sec}, #{znode[:mtime]/1000}"
+
+  # Don't remove parent directories
+  if znode[:children] > 0
+    return
+  end
+
+  if (znode[:mtime] / 1000) < (Time.now.tv_sec - opts[:old_time_secs])
+    yield(znode)
+  end
+end
+
 def get_node_data(path)
   node = $z.get(:path => path)
   if node[:rc] != 0
@@ -79,6 +101,7 @@ def get_node_data(path)
 
   return {
     :mtime => node[:stat].mtime,
+    :children => node[:stat].numChildren,
     :path => path
   }
 end
@@ -86,10 +109,14 @@ end
 nodes = []
 
 with_children(opts[:path]) do |_, childpath|
-  nodes << get_node_data(childpath)
+  if_recent(get_node_data(childpath), opts) do |znode|
+    nodes << znode
+  end
 end
 
-nodes << get_node_data(opts[:path])
+if_recent(get_node_data(opts[:path]), opts) do |znode|
+  nodes << znode
+end
 
 puts ">> Going to remove the following: "
 puts
