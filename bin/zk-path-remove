@@ -80,7 +80,7 @@ def if_recent(znode, opts)
     return
   end
 
-  puts "znode: #{znode[:path]}, now: #{Time.now.tv_sec}, #{znode[:mtime]/1000}"
+  #puts "znode: #{znode[:path]}, now: #{Time.now.tv_sec}, #{znode[:mtime]/1000}"
 
   # Don't remove parent directories
   if znode[:children] > 0
