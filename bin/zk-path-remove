@@ -82,6 +82,11 @@ def if_recent(znode, opts)
 
   puts "znode: #{znode[:path]}, now: #{Time.now.tv_sec}, #{znode[:mtime]/1000}"
 
+  # Don't remove parent directories
+  if znode[:children] > 0
+    return
+  end
+
   if (znode[:mtime] / 1000) < (Time.now.tv_sec - opts[:old_time_secs])
     yield(znode)
   end
@@ -96,6 +101,7 @@ def get_node_data(path)
 
   return {
     :mtime => node[:stat].mtime,
+    :children => node[:stat].numChildren,
     :path => path
   }
 end
