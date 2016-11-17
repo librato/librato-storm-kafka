@@ -290,6 +290,12 @@ end
 
 def add_monitor_partition(opts, part, pfx = "")
   work = {}
+
+  # Skip negative offsets
+  if part['offset'] < 0
+    return
+  end
+
   metric_prefix = "#{pfx}#{opts[:prefix]}topics.#{part['topology']['name']}.#{part['topic']}"
   source = "#{part['broker']['host']}_#{part['partition']}"
   debug_log "Adding monitor partition metric_prefix=#{metric_prefix} source=#{source}"
